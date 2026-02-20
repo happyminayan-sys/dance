@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>看護サマリー作成アプリ</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- PDF生成ライブラリを追加 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap');
+        
+        body { font-family: 'Noto Sans JP', sans-serif; background-color: #555; margin: 0; padding: 20px; }
+        
+        /* 帳票スタイル (A4) */
+        /* --- FIX START --- */
+        .sheet {
+            width: 210mm; height: 297mm; background: white; padding: 8mm 10mm;
+            box-shadow: 0 0 10px rgba(0,0,0,0.5); margin: 0 auto; color: black;
+            font-size: 10pt; line-height: 1.3; box-sizing: border-box;
+            display: flex; flex-direction: column; overflow: hidden;
+        }
+        /* --- FIX END --- */
+
+        /* Excel風テーブル */
+        table.excel {
+            width: 100%; border-collapse: collapse; border: 2px solid #000;
+            font-size: 9.5pt; table-layout: fixed; margin-bottom: 4px;
+        }
+        table.excel th, table.excel td {
+            border: 1px solid #000; padding: 2px 4px; vertical-align: middle;
+            word-wrap: break-word;
+        }
+        /* --- FIX START --- */
+        table.excel tr {
+            height: 1px; /* 印刷時の各行の最小高さを維持し、不要な縦伸びを防止する */
+        }
+        /* --- FIX END --- */
+        table.excel th { text-align: center; background-color: #f0f0f0; font-weight: normal; }
+
+        /* ユーティリティ */
+        .text-center { text-align: center; }
+        .text-right { text-align: right; }
+        .text-xs { font-size: 8pt; }
+        .font-bold { font-weight: bold; }
+        .text-red { color: #cc0000; }
+        .border-none { border: none !important; }
+        .border-b { border-bottom: 1px solid #000; }
+        .border-r { border-right: 1px solid #000; }
+        .border-l { border-left: 1px solid #000; }
+        .border-r-0 { border-right: none !important; }
+        .border-l-0 { border-left: none !important; }
+        .align-top { vertical-align: top !important; }
+        .p-0 { padding: 0 !important; }
+        .pl-8 { padding-left: 2rem !important; }
+        .bg-gray-50 { background-color: #f9fafb; }
+        .bg-gray-200 { background-color: #e5e7eb; }
+        .whitespace-nowrap { white-space: nowrap; }
+        .overflow-hidden { overflow: hidden; }
+        .text-ellipsis { text-overflow: ellipsis; }
+        .tracking-tighter { letter-spacing: -0.05em; }
+        
+        /* チェックボックス表現 */
+        .cb { display: inline-block; width: 11px; height: 11px; border: 1px solid #000; margin-right: 2px; position: relative; top: 1px; background: white;}
+        .cb.on::after { content: '✔'; position: absolute; top: -6px; left: -1px; font-size: 14px; font-weight: bold; color: black; }
+
+        /* 印刷設定 */
+        /* --- FIX START --- */
+        @media print {
+            body { background: white; padding: 0; margin: 0; -webkit-print-color-adjust: exact; }
+            .no-print { display: none !important; }
+            .sheet { 
+                width: 210mm; 
+                height: 297mm; 
+                box-shadow: none; 
+                padding: 10mm 12mm; 
+                margin: 0 auto; 
+                border: none;
+                display: flex;
+                flex-direction: column;
+            }
+            @page { size: A4 portrait; margin: 0; }
+        }
+        /* --- FIX END --- */
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        // ユーティリティ
+        const toWareki = (dateStr) => {
+            if (!dateStr) return '';
+            const date = new Date(dateStr);
+            if (isNaN(date.getTime())) return dateStr;
+            return date.toLocaleDateString('ja-JP-u-ca-japanese', { year: 'numeric', month: 'long', day: 'numeric' });
+        };
+
+        const calculateAge = (dateStr) => {
+            if (!dateStr) return '';
+            const birthDate = new Date(dateStr);
+            const today = new Date();
+            if (isNaN(birthDate.getTime())) return '';
+            let age = today.getFullYear() - birthDate.getFullYear();
+            const m = today.getMonth() - birthDate.getMonth();
+            if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) age--;
+            return age.toString();
+        };
+
+        const warekiToDateStr = (era, year, month, day) => {
+            if (!era || !year || !month || !day) return '';
+            let seirekiYear = parseInt(year);
+            if (era === '昭和') seirekiYear += 1925;
+            else if (era === '平成') seirekiYear += 1988;
+            else if (era === '令和') seirekiYear += 2018;
+            else if (era === '明治') seirekiYear += 1867;
+            else if (era === '大正') seirekiYear += 1911;
+            return `${seirekiYear}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+        };
+
+        // 初期データ (すべて空にする)
+        const initialData = {
+            createEra: '令和', createYear: '8', createMonth: '2', createDay: '20',
+            facilityName: '社会福祉法人 聖フランシスコ会\n特別養護老人ホーム カサデマドレ',
+            staffName: '',
+            
+            name: '', kana: '', gender: '男',
+            birthEra: '昭和', birthYear: '', birthMonth: '', birthDay: '',
+            birthDate: '', age: '',
+            height: '', weight: '', measureDate: '',
+            careLevel: '', careManager: '',
+            admissionDate: '', doctor: '',
+            address: '', tel: '',
+
+            kp1_name: '', kp1_rel: '', kp1_tel: '',
+            kp2_name: '', kp2_rel: '', kp2_tel: '',
+
+            pastIllness: '',
+            familyStructure: '', 
+            
+            infection: '', infectionDetail: '',
+            allergy: '', allergyDetail: '',
+
+            bp_sys: '', bp_dia: '', pulse: '', temp: '',
+            vaccine_flu: '', vaccine_corona: '', vaccine_corona_count: '',
+            
+            historyInfo: '',
+
+            move_status: { walk: false, cane: false, car: false, walker: false, wheelchair: false, reclining: false },
+            move_note: '', 
+
+            food_level: '', food_main: '', food_side: '', food_toromi: '',
+            food_note: '', 
+
+            exc_level: '', exc_tool: { toilet: false, portable: false, rehab_pants: false, diaper: false },
+            exc_urine_freq: '', exc_stool_freq: '', exc_last_stool_month: '', exc_last_stool_day: '',
+            exc_urine_sense: '', exc_stool_sense: '', exc_laxative: '', exc_laxative_detail: '',
+            exc_note: '', 
+
+            bath_level: '', bath_freq: '', bath_method: '', bath_last_month: '', bath_last_day: '',
+            bath_note: '', 
+
+            cloth_level: '', cloth_note: '', 
+
+            sleep_status: '', sleep_drug: '', sleep_drug_detail: '',
+            sleep_note: '', 
+
+            treatment_detail: '',
+
+            disability: { sight: false, hearing: false, speech: false, cognitive: false, motor: false, other: false },
+            communication: '', glasses: '', hearing_aid: '', denture: '', denture_detail: '',
+            specialNote: ''
+        };
+
+        const eras = ['昭和', '大正', '明治', '平成', '令和'];
+        const genders = ['男', '女'];
+        const careLevels = ['要支援1','要支援2','要介護1','要介護2','要介護3','要介護4','要介護5'];
+        const majorDiseases = ['高血圧症', '脳梗塞', '脳出血', 'アルツハイマー型認知症', 'レビー小体型認知症', '心不全', '誤嚥性肺炎', '糖尿病', '骨粗鬆症'];
+        const infectionList = ['ＨＢ抗原', 'ＨＣＶ', 'ＴＰ梅毒', 'ＭＲＳＡ'];
+        const stapleFoodOptions = ['米飯', '軟飯', '全粥', 'ミキサー粥', 'ゼリー粥', 'パン', '麺類'];
+        const sideDishOptions = ['常菜', '一口大', '粗刻み', '刻み', '極刻み', 'ペースト', 'ソフト食'];
+        const toromiOptions = ['なし', '有 (強)', '有 (中間)', '有 (薄い)'];
+
+        // UIコンポーネント (値を直接返すように統一)
+        const InputGroup = ({ title, children }) => (
+            <div className="bg-gray-800 p-3 rounded mb-4 border border-gray-600">
+                <h3 className="text-sm font-bold text-green-400 mb-2 border-b border-gray-600 pb-1">{title}</h3>
+                {children}
+            </div>
+        );
+        const Label = ({ children }) => <label className="block text-xs text-gray-400 mb-1">{children}</label>;
+        const Input = ({ value, onChange, placeholder, type="text", className="", ...props }) => (
+            <input 
+                type={type} 
+                value={value || ''} 
+                onChange={e => onChange(e.target.value)} 
+                placeholder={placeholder} 
+                className={`bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm text-white focus:border-blue-500 focus:outline-none ${className}`} 
+                {...props}
+            />
+        );
+        const TextArea = ({ value, onChange, placeholder, rows=2, className="", ...props }) => (
+            <textarea 
+                value={value || ''} 
+                onChange={e => onChange(e.target.value)} 
+                placeholder={placeholder} 
+                rows={rows} 
+                className={`w-full bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm text-white focus:border-blue-500 focus:outline-none ${className}`} 
+                {...props}
+            />
+        );
+        const Select = ({ value, onChange, options, className="" }) => (
+            <select 
+                value={value || ''} 
+                onChange={e => onChange(e.target.value)} 
+                className={`bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm text-white focus:border-blue-500 focus:outline-none ${className}`} 
+            >
+                <option value="">選択</option>
+                {options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+            </select>
+        );
+        const CheckBox = ({ label, checked, onChange }) => (
+            <label className="flex items-center cursor-pointer mr-3 mb-1">
+                <input 
+                    type="checkbox" 
+                    checked={!!checked} 
+                    onChange={e => onChange(e.target.checked)} 
+                    className="mr-1" 
+                />
+                <span className="text-sm text-gray-200">{label}</span>
+            </label>
+        );
+        const RadioGroup = ({ options, value, onChange }) => (
+            <div className="flex flex-wrap gap-2">
+                {options.map(opt => (
+                    <label key={opt} className="flex items-center cursor-pointer">
+                        <input 
+                            type="radio" 
+                            checked={value === opt} 
+                            onChange={() => onChange(opt)} 
+                            className="mr-1" 
+                        />
+                        <span className="text-sm text-gray-200">{opt}</span>
+                    </label>
+                ))}
+            </div>
+        );
+
+        function App() {
+            const [data, setData] = useState(() => {
+                try {
+                    const saved = localStorage.getItem('summaryDataFinal_v4');
+                    return saved ? JSON.parse(saved) : initialData;
+                } catch { return initialData; }
+            });
+            const [historyYear, setHistoryYear] = useState('');
+
+            useEffect(() => { localStorage.setItem('summaryDataFinal_v4', JSON.stringify(data)); }, [data]);
+
+            const up = (key, val) => setData(p => ({ ...p, [key]: val }));
+            const upDeep = (pKey, key, val) => setData(p => ({ ...p, [pKey]: { ...p[pKey], [key]: val } }));
+
+            const handleBirthChange = (key, val) => {
+                setData(prev => {
+                    const next = { ...prev, [key]: val };
+                    const dateStr = warekiToDateStr(next.birthEra, next.birthYear, next.birthMonth, next.birthDay);
+                    const age = calculateAge(dateStr);
+                    return { ...next, birthDate: dateStr, age };
+                });
+            };
+
+            const addDisease = (disease) => {
+                if(!disease) return;
+                const entry = historyYear ? `${disease} (${historyYear})` : disease;
+                setData(p => ({ ...p, pastIllness: p.pastIllness ? p.pastIllness + '\n' + entry : entry }));
+            };
+
+            const getCheckedItems = (obj, labels) => {
+                return Object.keys(obj)
+                    .filter(key => obj[key])
+                    .map(key => labels[key] || key)
+                    .join('、');
+            };
+
+            const moveLabels = { walk: '独歩', cane: '杖', car: '老人車', walker: '歩行器', wheelchair: '車椅子', reclining: 'リクライニング' };
+            const excLabels = { toilet: 'トイレ', portable: 'ポータブル', rehab_pants: 'リハパン', diaper: 'オムツ' };
+            const disLabels = { sight: '視覚', hearing: '聴覚', speech: '言語', cognitive: '認知', motor: '運動', other: 'その他' };
+
+            // --- PDFエクスポート処理 ---
+            const handleExportPdf = () => {
+                const element = document.getElementById('print-area');
+                if (!element) return;
+
+                // html2pdfの設定オプション
+                const opt = {
+                    margin: 0, // 余白なし（CSS側のpaddingを使用）
+                    filename: `看護サマリー_${data.name || '新規'}.pdf`,
+                    image: { type: 'jpeg', quality: 0.98 },
+                    html2canvas: { 
+                        scale: 2, 
+                        useCORS: true, 
+                        letterRendering: true,
+                        logging: false 
+                    },
+                    jsPDF: { 
+                        unit: 'mm', 
+                        format: 'a4', 
+                        orientation: 'portrait' 
+                    }
+                };
+
+                // ライブラリを使用してPDF生成を実行
+                if (window.html2pdf) {
+                    window.html2pdf().set(opt).from(element).save();
+                } else {
+                    console.error('html2pdf library is not loaded');
+                }
+            };
+
+            // データ保存（JSONファイル書き出し）
+            const handleSaveFile = () => {
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `看護サマリー_${data.name || 'データ'}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+            };
+
+            // データ読み込み（JSONファイル読み込み）
+            const handleLoadFile = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    try {
+                        const json = JSON.parse(event.target.result);
+                        setData(json);
+                    } catch (err) {
+                        console.error('Failed to load JSON:', err);
+                    }
+                };
+                reader.readAsText(file);
+                e.target.value = ''; // 連続読み込みを可能にするためリセット
+            };
+
+            return (
+                <div className="flex flex-col md:flex-row min-h-screen">
+                    {/* 左側：入力フォーム */}
+                    <div className="w-full md:w-1/3 bg-gray-900 text-white p-4 overflow-y-auto h-screen no-print box-border">
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="text-xl font-bold text-green-400">詳細サマリー入力</h2>
+                            <div className="flex gap-2">
+                                <button onClick={() => {if(window.confirm('全ての入力を消去しますか？')){setData(initialData)}}} className="bg-red-600 px-3 py-1 rounded text-sm hover:bg-red-500">クリア</button>
+                                
+                                <button onClick={handleSaveFile} className="bg-blue-600 px-3 py-1 rounded text-sm hover:bg-blue-500">保存</button>
+                                <button onClick={() => document.getElementById('file-input').click()} className="bg-gray-600 px-3 py-1 rounded text-sm hover:bg-gray-500">読込</button>
+                                <input id="file-input" type="file" accept=".json" onChange={handleLoadFile} className="hidden" />
+
+                                <button onClick={handleExportPdf} className="bg-orange-600 px-3 py-1 rounded text-sm font-bold hover:bg-orange-500 text-white shadow">PDF保存</button>
+                            </div>
+                        </div>
+
+                        <InputGroup title="1. 基本情報">
+                        <Label>作成日</Label>
+                            <div className="relative bg-gray-700 rounded border border-gray-600">
+                                        <input type="date" value={data.admissionDate} onChange={e=>up('admissionDate',e.target.value)} className="w-full bg-transparent text-white px-2 py-1 outline-none cursor-pointer" style={{colorScheme:"dark"}}/>
+                                        <span className="absolute right-2 top-1 pointer-events-none">📅</span>
+                                    </div>
+                            <div className="grid grid-cols-2 gap-2 mb-2">
+                                <div><Label>フリガナ</Label><Input value={data.kana} onChange={v=>up('kana',v)} /></div>
+                                <div><Label>氏名</Label><Input value={data.name} onChange={v=>up('name',v)} /></div>
+                            </div>
+                            
+                            <div className="mb-2">
+                                <Label>性別</Label>
+                                <Select value={data.gender} onChange={v=>up('gender',v)} options={genders} className="w-1/2"/>
+                            </div>
+                            
+                            <Label>生年月日 (和暦入力) + 年齢</Label>
+                            <div className="flex gap-1 mb-4 items-center">
+                                <Select value={data.birthEra} onChange={v=>handleBirthChange('birthEra',v)} options={eras} className="w-20"/>
+                                <Input value={data.birthYear} onChange={v=>handleBirthChange('birthYear',v)} className="w-12 text-center" placeholder="年"/>
+                                <Input value={data.birthMonth} onChange={v=>handleBirthChange('birthMonth',v)} className="w-10 text-center" placeholder="月"/>
+                                <Input value={data.birthDay} onChange={v=>handleBirthChange('birthDay',v)} className="w-10 text-center" placeholder="日"/>
+                                <div className="text-yellow-400 font-bold ml-1">{data.age}歳</div>
+                            </div>
+
+                            <div className="mb-2 w-full"> <Label>住所</Label> <Input className="w-full" value={data.address} onChange={v => up('address', v)} /></div>
+                            <div className="mb-4"><Label>電話番号</Label><Input value={data.tel} onChange={v=>up('tel',v)} /></div>
+                            
+                            <div className="grid grid-cols-2 gap-2 mb-4">
+                                <div>
+                                    <Label>入所日 (カレンダー)</Label>
+                                    <div className="relative bg-gray-700 rounded border border-gray-600">
+                                        <input type="date" value={data.createdDate} onChange={e=>up('createdDate',e.target.value)} className="w-full bg-transparent text-white px-2 py-1 outline-none cursor-pointer" style={{colorScheme:"dark"}}/>
+                                        <span className="absolute right-2 top-1 pointer-events-none">📅</span>
+                                    </div>
+                                </div>
+                                <div><Label>主治医</Label><Input value={data.doctor} onChange={v=>up('doctor',v)} /></div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2 mb-2">
+                                <div><Label>介護度</Label><Select value={data.careLevel} onChange={v=>up('careLevel',v)} options={careLevels} /></div>
+                                <div><Label>ケアマネ</Label><Input value={data.careManager} onChange={v=>up('careManager',v)} placeholder="担当ケアマネ"/></div>
+                            </div>
+                        </InputGroup>
+
+                        <InputGroup title="2. キーパーソン">
+                            <div className="grid grid-cols-3 gap-1 mb-2">
+                                <div className="col-span-1"><Label>連絡先① 氏名</Label><Input value={data.kp1_name} onChange={v=>up('kp1_name',v)} /></div>
+                                <div className="col-span-1"><Label>続柄</Label><Input value={data.kp1_rel} onChange={v=>up('kp1_rel',v)} /></div>
+                                <div className="col-span-1"><Label>TEL</Label><Input value={data.kp1_tel} onChange={v=>up('kp1_tel',v)} /></div>
+                            </div>
+                            <div className="grid grid-cols-3 gap-1">
+                                <div className="col-span-1"><Label>連絡先② 氏名</Label><Input value={data.kp2_name} onChange={v=>up('kp2_name',v)} /></div>
+                                <div className="col-span-1"><Label>続柄</Label><Input value={data.kp2_rel} onChange={v=>up('kp2_rel',v)} /></div>
+                                <div className="col-span-1"><Label>TEL</Label><Input value={data.kp2_tel} onChange={v=>up('kp2_tel',v)} /></div>
+                            </div>
+                        </InputGroup>
+
+                        <InputGroup title="3. 医療情報">
+                            <Label>既往歴 (年 + 選択)</Label>
+                            <div className="flex gap-2 mb-2">
+                                <Input value={historyYear} onChange={val => setHistoryYear(val)} placeholder="年(R2)" className="w-1/3"/>
+                                <select onChange={e=>{addDisease(e.target.value); e.target.value=''}} className="w-2/3 bg-gray-900 border border-gray-600 rounded text-sm text-white">
+                                    <option value="">▼病名選択</option>
+                                    {majorDiseases.map(d=><option key={d} value={d}>{d}</option>)}
+                                </select>
+                            </div>
+                            <TextArea value={data.pastIllness} onChange={v=>up('pastIllness',v)} rows="3" />
+                            <Label>家族構成</Label>
+                            <TextArea value={data.familyStructure} onChange={v=>up('familyStructure',v)} rows="2" placeholder="家族構成" />
+                            <div className="grid grid-cols-2 gap-2 mt-2">
+                                <div>
+                                    <Label>感染症</Label>
+                                    <div className="flex gap-2">
+                                        <select 
+                                            value={data.infection} 
+                                            onChange={e => up('infection', e.target.value)}
+                                            className="bg-gray-900 border border-gray-600 rounded px-1 text-sm text-white focus:border-blue-500 w-16"
+                                        >
+                                            <option value="">未</option>
+                                            <option value="有">有</option>
+                                            <option value="無">無</option>
+                                        </select>
+                                        <div className="flex-1 flex gap-1">
+                                            <select 
+                                                className="w-20 bg-gray-900 border border-gray-600 rounded px-1 text-sm text-white focus:border-blue-500"
+                                                onChange={e => {
+                                                    if(!e.target.value) return;
+                                                    const current = data.infectionDetail || '';
+                                                    const newVal = current ? current + '、' + e.target.value : e.target.value;
+                                                    up('infectionDetail', newVal);
+                                                    e.target.value = '';
+                                                }}
+                                            >
+                                                <option value="">▼選択</option>
+                                                {infectionList.map(i => <option key={i} value={i}>{i}</option>)}
+                                            </select>
+                                            <Input value={data.infectionDetail} onChange={v=>up('infectionDetail',v)} placeholder="詳細" className="flex-1"/>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <Label>アレルギー</Label>
+                                    <div className="flex gap-2">
+                                        <select 
+                                            value={data.allergy} 
+                                            onChange={e => up('allergy', e.target.value)}
+                                            className="bg-gray-900 border border-gray-600 rounded px-1 text-sm text-white focus:border-blue-500"
+                                        >
+                                            <option value="">未</option>
+                                            <option value="有">有</option>
+                                            <option value="無">無</option>
+                                        </select>
+                                        <Input value={data.allergyDetail} onChange={v=>up('allergyDetail',v)} placeholder="詳細" className="flex-1"/>
+                                    </div>
+                                </div>
+                            </div>
+                        </InputGroup>
+
+                        <InputGroup title="4. 一般状態・ワクチン">
+                             <div className="mb-2">
+                                <Label>身体計測</Label>
+                                <div className="grid grid-cols-3 gap-2">
+                                    <Input value={data.height} onChange={v=>up('height',v)} placeholder="身長cm" />
+                                    <Input value={data.weight} onChange={v=>up('weight',v)} placeholder="体重kg" />
+                                    <div className="relative bg-gray-700 rounded border border-gray-600">
+                                        <input type="date" value={data.measureDate} onChange={e=>up('measureDate',e.target.value)} className="w-full bg-transparent text-white px-1 py-1 outline-none cursor-pointer text-xs" style={{colorScheme:"dark"}}/>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-4 gap-2 mb-2">
+                                <div><Label>血圧(上)</Label><Input value={data.bp_sys} onChange={v=>up('bp_sys',v)}/></div>
+                                <div><Label>血圧(下)</Label><Input value={data.bp_dia} onChange={v=>up('bp_dia',v)}/></div>
+                                <div><Label>脈拍</Label><Input value={data.pulse} onChange={v=>up('pulse',v)}/></div>
+                                <div><Label>体温</Label><Input value={data.temp} onChange={v=>up('temp',v)}/></div>
+                            </div>
+                            <div className="mb-2"><Label>インフル接種日</Label><input type="date" value={data.vaccine_flu} onChange={e=>up('vaccine_flu',e.target.value)} className="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1 text-white" style={{colorScheme:"dark"}}/></div>
+                            <div className="flex gap-2 mb-2">
+                                <div className="w-2/3"><Label>コロナ接種日</Label><input type="date" value={data.vaccine_corona} onChange={e=>up('vaccine_corona',e.target.value)} className="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1 text-white" style={{colorScheme:"dark"}}/></div>
+                                <div className="w-1/3"><Label>回数</Label><Input value={data.vaccine_corona_count} onChange={v=>up('vaccine_corona_count',v)}/></div>
+                            </div>
+                            <Label>入院までの経過</Label>
+                            <TextArea value={data.historyInfo} onChange={v=>up('historyInfo',v)} rows="4" />
+                        </InputGroup>
+
+                        <InputGroup title="5. ADL詳細">
+                            <div className="mb-3">
+                                <Label>移動</Label>
+                                <div className="flex flex-wrap gap-3 mb-2">
+                                    <CheckBox label="独歩" checked={data.move_status.walk} onChange={v=>upDeep('move_status','walk',v)}/>
+                                    <CheckBox label="杖" checked={data.move_status.cane} onChange={v=>upDeep('move_status','cane',v)}/>
+                                    <CheckBox label="老人車" checked={data.move_status.car} onChange={v=>upDeep('move_status','car',v)}/>
+                                    <CheckBox label="歩行器" checked={data.move_status.walker} onChange={v=>upDeep('move_status','walker',v)}/>
+                                    <CheckBox label="車椅子" checked={data.move_status.wheelchair} onChange={v=>upDeep('move_status','wheelchair',v)}/>
+                                    <CheckBox label="リクライニング" checked={data.move_status.reclining} onChange={v=>upDeep('move_status','reclining',v)}/>
+                                </div>
+                                <TextArea value={data.move_note} onChange={v=>up('move_note',v)} placeholder="具体的状況 (例: 自操可)" rows="2" />
+                            </div>
+                            <div className="mb-3 border-t border-gray-600 pt-2">
+                                <Label>食事</Label>
+                                <RadioGroup options={['自立','部分介助','全介助','絶食']} value={data.food_level} onChange={v=>up('food_level',v)}/>
+                                <div className="grid grid-cols-2 gap-2 mt-2">
+                                    <div><Label>主食</Label><Select options={stapleFoodOptions} value={data.food_main} onChange={v=>up('food_main',v)}/></div>
+                                    <div><Label>副食</Label><Select options={sideDishOptions} value={data.food_side} onChange={v=>up('food_side',v)}/></div>
+                                </div>
+                                <div className="mt-1"><Label>トロミ</Label><Select options={toromiOptions} value={data.food_toromi} onChange={v=>up('food_toromi',v)}/></div>
+                                <div className="mt-2"><TextArea value={data.food_note} onChange={v=>up('food_note',v)} placeholder="具体的状況" rows="2" /></div>
+                            </div>
+                            <div className="mb-3 border-t border-gray-600 pt-2">
+                                <Label>排泄</Label>
+                                <RadioGroup options={['自立','部分介助','全介助']} value={data.exc_level} onChange={v=>up('exc_level',v)}/>
+                                <div className="flex flex-wrap gap-2 mt-2">
+                                    <CheckBox label="トイレ" checked={data.exc_tool.toilet} onChange={v=>upDeep('exc_tool','toilet',v)}/>
+                                    <CheckBox label="ポータブル" checked={data.exc_tool.portable} onChange={v=>upDeep('exc_tool','portable',v)}/>
+                                    <CheckBox label="リハパン" checked={data.exc_tool.rehab_pants} onChange={v=>upDeep('exc_tool','rehab_pants',v)}/>
+                                    <CheckBox label="オムツ" checked={data.exc_tool.diaper} onChange={v=>upDeep('exc_tool','diaper',v)}/>
+                                </div>
+                                <div className="grid grid-cols-2 gap-2 mt-2">
+                                    <div><Label>排尿(回/日)</Label><Input value={data.exc_urine_freq} onChange={v=>up('exc_urine_freq',v)}/></div>
+                                    <div><Label>排便(回/日)</Label><Input value={data.exc_stool_freq} onChange={v=>up('exc_stool_freq',v)}/></div>
+                                </div>
+                                <div className="flex gap-2 mt-2 items-center">
+                                    <Label>最終排便</Label>
+                                    <Input value={data.exc_last_stool_month} onChange={v=>up('exc_last_stool_month',v)} className="w-10 text-center"/>月
+                                    <Input value={data.exc_last_stool_day} onChange={v=>up('exc_last_stool_day',v)} className="w-10 text-center"/>日
+                                </div>
+                                <div className="flex gap-4 mt-2">
+                                    <div><Label>尿意</Label><RadioGroup options={['有','無']} value={data.exc_urine_sense} onChange={v=>up('exc_urine_sense',v)}/></div>
+                                    <div><Label>便意</Label><RadioGroup options={['有','無']} value={data.exc_stool_sense} onChange={v=>up('exc_stool_sense',v)}/></div>
+                                </div>
+                                <div className="mt-2 flex gap-2">
+                                    <Label>下剤</Label>
+                                    <RadioGroup options={['有','無']} value={data.exc_laxative} onChange={v=>up('exc_laxative',v)}/>
+                                    <Input value={data.exc_laxative_detail} onChange={v=>up('exc_laxative_detail',v)} placeholder="薬剤名"/>
+                                </div>
+                                <div className="mt-2"><TextArea value={data.exc_note} onChange={v=>up('exc_note',v)} placeholder="具体的状況" rows="2" /></div>
+                            </div>
+                            <div className="mb-3 border-t border-gray-600 pt-2">
+                                <Label>入浴</Label>
+                                <RadioGroup options={['自立','部分介助','全介助']} value={data.bath_level} onChange={v=>up('bath_level',v)}/>
+                                <div className="flex gap-4 mt-2">
+                                    <div><Label>回数/週</Label><Input value={data.bath_freq} onChange={v=>up('bath_freq',v)} className="w-16"/></div>
+                                    <div><Label>方法</Label><RadioGroup options={['個浴','特浴']} value={data.bath_method} onChange={v=>up('bath_method',v)}/></div>
+                                </div>
+                                <div className="flex gap-2 mt-2 items-center">
+                                    <Label>最終入浴</Label>
+                                    <Input value={data.bath_last_month} onChange={v=>up('bath_last_month',v)} className="w-10 text-center"/>月
+                                    <Input value={data.bath_last_day} onChange={v=>up('bath_last_day',v)} className="w-10 text-center"/>日
+                                </div>
+                                <div className="mt-2"><TextArea value={data.bath_note} onChange={v=>up('bath_note',v)} placeholder="具体的状況" rows="2" /></div>
+                            </div>
+                            <div className="mb-3 border-t border-gray-600 pt-2">
+                                <Label>更衣</Label>
+                                <RadioGroup options={['自立','部分介助','全介助']} value={data.cloth_level} onChange={v=>up('cloth_level',v)}/>
+                                <div className="mt-2"><TextArea value={data.cloth_note} onChange={v=>up('cloth_note',v)} placeholder="具体的状況" rows="2" /></div>
+                            </div>
+                            <div className="mb-3 border-t border-gray-600 pt-2">
+                                <Label>睡眠</Label>
+                                <RadioGroup options={['良好','時々不眠','不眠']} value={data.sleep_status} onChange={v=>up('sleep_status',v)}/>
+                                <div className="flex gap-2 mt-2">
+                                    <Label>眠剤</Label>
+                                    <RadioGroup options={['有','無']} value={data.sleep_drug} onChange={v=>up('sleep_drug',v)}/>
+                                    <Input value={data.sleep_drug_detail} onChange={v=>up('sleep_drug_detail',v)} placeholder="薬剤名"/>
+                                </div>
+                                <div className="mt-2"><TextArea value={data.sleep_note} onChange={v=>up('sleep_note',v)} placeholder="具体的状況" rows="2" /></div>
+                            </div>
+                          
+                            <div className="mb-3 border-t border-gray-600 pt-2">
+                                <Label>障害・感覚・物品</Label>
+                                <div className="flex flex-wrap gap-3 mb-2">
+                                    <CheckBox label="視覚" checked={data.disability.sight} onChange={v=>upDeep('disability','sight',v)}/>
+                                    <CheckBox label="聴覚" checked={data.disability.hearing} onChange={v=>upDeep('disability','hearing',v)}/>
+                                    <CheckBox label="言語" checked={data.disability.speech} onChange={v=>upDeep('disability','speech',v)}/>
+                                    <CheckBox label="認知" checked={data.disability.cognitive} onChange={v=>upDeep('disability','cognitive',v)}/>
+                                    <CheckBox label="運動" checked={data.disability.motor} onChange={v=>upDeep('disability','motor',v)}/>
+                                    <CheckBox label="その他" checked={data.disability.other} onChange={v=>upDeep('disability','other',v)}/>
+                                </div>
+                                <div className="mb-2"><Label>意思疎通</Label><RadioGroup options={['可','一部','不可']} value={data.communication} onChange={v=>up('communication',v)}/></div>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <div><Label>メガネ</Label><RadioGroup options={['有','無']} value={data.glasses} onChange={v=>up('glasses',v)}/></div>
+                                    <div><Label>補聴器</Label><RadioGroup options={['有','無']} value={data.hearing_aid} onChange={v=>up('hearing_aid',v)}/></div>
+                                    <div><Label>義歯</Label><RadioGroup options={['有','無']} value={data.denture} onChange={v=>up('denture',v)}/>
+                                    <Input value={data.denture_detail} onChange={v=>up('denture_detail',v)} placeholder="詳細"/></div>
+                                </div>
+                                <div className="mb-3 border-t border-gray-600 pt-2">
+                                <Label>処置内容</Label>
+                                <TextArea value={data.treatment_detail} onChange={v=>up('treatment_detail',v)} rows="2" />
+                                </div>
+                            </div>
+                        </InputGroup>
+                        
+                        <InputGroup title="6. その他">
+                            
+                            <Label>特記事項</Label>
+                            <TextArea value={data.specialNote} onChange={v=>up('specialNote',v)} rows="3" />
+                            <Label>施設名</Label><TextArea value={data.facilityName} onChange={v=>up('facilityName',v)} rows="2" />
+                            <Label>担当者名</Label><Input value={data.staffName} onChange={v=>up('staffName',v)}/>
+                        </InputGroup>
+                    </div>
+
+                    {/* 右側：プレビュー (A4印刷用) */}
+                    <div className="w-full md:w-2/3 bg-gray-500 p-4 overflow-y-auto h-screen flex justify-center">
+                        <div id="print-area" className="sheet">
+                            
+                            {/* ヘッダー */}
+                            <div className="relative border-b-2 border-black mb-1 pb-1 h-10 flex items-end justify-center">
+                                <h1 className="text-2xl font-bold">看護サマリー</h1>
+                                <div className="absolute right-0 bottom-1 text-sm">
+                                    作成日：{toWareki(data.admissionDate)}
+                                </div>
+                            </div>
+
+                            {/* 基本情報エリア */}
+                            <table className="excel mb-1 mt-2">
+                                {/* 列定義（8列） */}
+                                <colgroup>
+                                    <col style={{width:'70px'}}/><col style={{width:'14%'}}/>
+                                    <col style={{width:'30px'}}/><col style={{width:'40px'}}/>
+                                    <col style={{width:'60px'}}/><col style={{width:'auto'}}/>
+                                    <col style={{width:'80px'}}/><col style={{width:'14%'}}/>
+                                </colgroup>
+                                <tbody>
+                                    {/* 1行目 */}
+                                    <tr>
+                                        <th>フリガナ</th>
+                                        <td colSpan="2" className="border-r-0 p-0 overflow-visible">
+                                            <div className="w-full px-1 whitespace-nowrap font">
+                                                {data.kana}
+                                            </div>
+                                        </td>
+                                        <td className="border-l-0"></td>
+                                        <th>住所</th>
+                                        <td className="text-xs p-1">{data.address}</td>
+                                        <th>入所日</th>
+                                        <td className="text-center text-xs whitespace-nowrap tracking-tighter px-0 font">{toWareki(data.createdDate)}</td>
+                                    </tr>
+                                    {/* 2行目 */}
+                                    <tr>
+                                        <th>氏名</th>
+                                        <td colSpan="2" className="p-1 font whitespace-nowrap overflow-visible border-r">
+                                            <div className="w-full flex justify-between items-center px-1">
+                                                <div className="flex items-center gap-1">
+                                                    <span className="text-base tracking-tighter">{data.name}</span>
+                                                    <span className="text-sm font-normal">様</span>
+                                                </div>
+                                            </div>
+                                        </td>
+                                        <td className="text-center p-0 border-l border-r whitespace-nowrap">
+                                            {data.gender}
+                                        </td>
+                                        <th>TEL</th>
+                                        <td className="text-center text-xs whitespace-nowrap">{data.tel}</td>
+                                        <th>主治医</th>
+                                        <td className="text-center text-xs whitespace-nowrap">{data.doctor}</td>
+                                    </tr>
+                                    {/* 3行目 */}
+                                    <tr>
+                                        <th>生年月日</th>
+                                        <td colSpan="2" className="text-center p-0 border-r-0 overflow-visible">
+                                            <div className="w-full px-1 whitespace-nowrap text-[12px] tracking-tighter font">
+                                                {data.birthEra}{data.birthYear}年{data.birthMonth}月{data.birthDay}日
+                                            </div>
+                                        </td>
+                                        <td className="text-center p-0  border-l border-r whitespace-nowrap">
+                                            <span className="text-xs font">{data.age}歳</span>
+                                        </td>
+                                        <td colSpan="4" className="p-0">
+                                            <div className="flex h-full items-center">
+                                                <div className="w-[100px] border-r border-black h-full flex items-center justify-center bg-gray-100 ">介護度</div>
+                                                <div className="w-[100px] border-r border-black h-full flex items-center justify-center text-sm ">{data.careLevel}</div>
+                                                <div className="w-[80px] border-r border-black h-full flex items-center justify-center bg-gray-100 text-xs ">ケアマネ</div>
+                                                <div className="flex-1 h-full flex items-center justify-center text-sm">{data.careManager}</div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+
+                            {/* キーパーソンエリア */}
+                            <table className="excel mb-1">
+                                <colgroup>
+                                    <col style={{width:'12%'}}/><col/>
+                                </colgroup>
+                                <tbody>
+                                    <tr>
+                                        <th rowSpan="2">キーパーソン</th>
+                                        <td className="p-0 align-top">
+                                            <div className="flex h-full">
+                                                <div className="w-1/2 border-r border-black">
+                                                    <div className="border-b border-dotted border-black p-1 text-xs bg-gray-50">
+                                                        <span className="border border-black px-1">緊急時連絡先①</span>
+                                                    </div>
+                                                    <div className="flex">
+                                                        <div className="w-3/4 border-r border-black p-1 text-sm">
+                                                            <div>{data.kp1_name}</div>
+                                                            <div className="text-xs">TEL: {data.kp1_tel}</div>
+                                                        </div>
+                                                        <div className="w-1/4 p-1 text-xs flex items-center justify-center">続柄:<br/>{data.kp1_rel}</div>
+                                                    </div>
+                                                </div>
+                                                <div className="w-1/2">
+                                                    <div className="border-b border-dotted border-black p-1 text-xs bg-gray-50">
+                                                        <span className="border border-black px-1">緊急時連絡先②</span>
+                                                    </div>
+                                                    <div className="flex">
+                                                        <div className="w-3/4 border-r border-black p-1 text-sm">
+                                                            <div>{data.kp2_name}</div>
+                                                            <div className="text-xs">TEL: {data.kp2_tel}</div>
+                                                        </div>
+                                                        <div className="w-1/4 p-1 text-xs flex items-center justify-center">続柄:<br/>{data.kp2_rel}</div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+
+                            {/* 既往歴・家族構成・感染症・アレルギーエリア */}
+                            <table className="excel mb-1">
+                                <colgroup>
+                                    <col style={{width:'12%'}}/><col style={{width:'38%'}}/>
+                                    <col style={{width:'12%'}}/><col style={{width:'38%'}}/>
+                                </colgroup>
+                                <tbody>
+                                    <tr>
+                                        <th style={{height:'70px'}}>既往歴</th>
+                                        <td className="align-top" style={{whiteSpace:'pre-wrap'}}>{data.pastIllness}</td>
+                                        <th>家族構成</th>
+                                        <td className="align-top" style={{whiteSpace:'pre-wrap'}}>{data.familyStructure}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                            {/* 感染症・アレルギー行 */}
+                            <table className="excel mb-1">
+                                <colgroup>
+                                    <col style={{width:'12%'}}/><col style={{width:'38%'}}/>
+                                    <col style={{width:'12%'}}/><col style={{width:'38%'}}/>
+                                </colgroup>
+                                <tbody>
+                                    <tr>
+                                        <th>感染症</th>
+                                        <td>{data.infection === '有' ? (data.infectionDetail && data.infectionDetail.trim() !== '' ? `有 (${data.infectionDetail})` : '有') : '無'}</td>
+                                        <th className="bg-gray-200 border-l border-black">アレルギー</th>
+                                        <td>{data.allergy === '有' ? (data.allergyDetail && data.allergyDetail.trim() !== '' ? `有 (${data.allergyDetail})` : '有') : '無'}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+
+                            {/* 一般状態 */}
+                            <div className="text-center font-bold text-sm border-b border-black mb-1">&lt;入所期間中の一般状態&gt;</div>
+                            <table className="excel mb-1 border-none">
+                                <tbody>
+                                    <tr className="border-none">
+                                        <td className="border-none p-0">
+                                            <div className="border border-black p-1 mb-1 text-center font-normal">
+                                                <span>身長：{data.height} cm / 体重：{data.weight} kg</span>
+                                                {data.measureDate && (
+                                                    <span className="text-sm text-black">
+                                                        （{toWareki(data.measureDate)}現在）
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="border border-black p-1 flex justify-around ">
+                                                <span>血圧： {data.bp_sys} / {data.bp_dia}</span>
+                                                <span>脈拍： {data.pulse}</span>
+                                                <span>体温： {data.temp}</span>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                    <tr className="border-none">
+                                        <td className="border-none p-0 pt-1">
+                                            <div className="border border-black p-1 text-center">
+                                                ワクチン接種： インフルエンザ ({data.vaccine_flu ? toWareki(data.vaccine_flu) : 'ー'})　：　
+                                                コロナ ({data.vaccine_corona ? toWareki(data.vaccine_corona) : 'ー'} {data.vaccine_corona_count ? data.vaccine_corona_count+'回目':''})
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+
+                            <div className="text-sm font-bold border-b border-black mb-1">&lt;入院までの経過&gt;</div>
+                            <div className="border border-black p-2 min-h-[70px] text-sm mb-1" style={{whiteSpace:'pre-wrap'}}>
+                                {data.historyInfo}
+                            </div>
+
+                            {/* ADL表（チェック済みのみ表示） */}
+                            <table className="excel flex-grow">
+                                <colgroup>
+                                    <col style={{width:'12%'}}/><col style={{width:'30%'}}/><col/>
+                                </colgroup>
+                                <thead>
+                                    <tr>
+                                        <th>項目</th>
+                                        <th>ADL状況</th>
+                                        <th>詳細・留意事項</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <th>移動</th>
+                                        <td>{getCheckedItems(data.move_status, moveLabels)}</td>
+                                        <td style={{whiteSpace:'pre-wrap'}}>{data.move_note}</td>
+                                    </tr>
+                                    <tr>
+                                        <th>食事</th>
+                                        <td>{data.food_level}</td>
+                                        <td className="text-xs p-1">
+                                            <div>主食: {data.food_main} / 副食: {data.food_side}</div>
+                                            <div>とろみ: {data.food_toromi}</div>
+                                            <div style={{whiteSpace:'pre-wrap'}}>{data.food_note}</div>
+                                        </td>
+                                    </tr>
+                                     <tr>
+                                      <th className="bg-gray-100 border-r border-black p-1 text-sm font-normal align-middle">
+                                        排泄
+                                      </th>
+                                      
+                                      <td className="border-r border-black p-1 align-top leading-tight">
+                                        <div className="border-b border-dotted border-black mb-0.5 pb-0.5 text-sm">
+                                          {data.exc_level}
+                                        </div>
+                                        <div className="text-[11px]">
+                                          排尿: {data.exc_urine_freq}回/日<br/>
+                                          排便: {data.exc_stool_freq}
+                                        </div>
+                                      </td>
+
+                                      {/* relativeを指定し、高さを中身（テキスト）に合わせる */}
+                                      <td className="p-1 align-top text-[11px] leading-tight relative min-h-[3em]">
+                                        <div>
+                                          <div>用具: {getCheckedItems(data.exc_tool, excLabels)}</div>
+                                          <div className="flex gap-2">
+                                            <span>尿意: {data.exc_urine_sense}</span>
+                                            <span>便意: {data.exc_stool_sense}</span>
+                                          </div>
+                                          <div>下剤: {data.exc_laxative === '有' ? `有 (${data.exc_laxative_detail})` : '無'}</div>
+                                          <div style={{ whiteSpace: 'pre-wrap' }}>{data.exc_note}</div>
+                                        </div>
+                                        
+                                        {/* absoluteで右下に固定。これでこの行自体は高さを取らなくなります */}
+                                        <div className="absolute bottom-2 right-1 text-[12px]">
+                                          最終排便: {data.exc_last_stool_month}/{data.exc_last_stool_day}
+                                        </div>
+                                      </td>
+                                    </tr>
+                                    <tr>
+                                        <th>入浴</th>
+                                        <td className="p-1">
+                                            <div className=" border-b border-dotted border-black mb-1">{data.bath_level}</div>
+                                            <div className="text-xs">{data.bath_freq}回/週</div>
+                                        </td>
+                                        <td className="text-xs p-1">
+                                            <div>方法: {data.bath_method}</div>
+                                            <div style={{whiteSpace:'pre-wrap'}}>{data.bath_note}</div>
+                                            <div className="text-right mt-1 ">最終入浴: {data.bath_last_month}/{data.bath_last_day}</div>
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <th>更衣</th>
+                                        <td>{data.cloth_level}</td>
+                                        <td style={{whiteSpace:'pre-wrap'}}>{data.cloth_note}</td>
+                                    </tr>
+                                    <tr>
+                                        <th>睡眠</th>
+                                        <td>{data.sleep_status}</td>
+                                        <td className="text-xs">
+                                            <div>眠剤: {data.sleep_drug === '有' ? `有 (${data.sleep_drug_detail})` : '無'}</div>
+                                            <div style={{whiteSpace:'pre-wrap'}}>{data.sleep_note}</div>
+                                        </td>
+                                    </tr>
+                                    
+                                    <tr>
+                                        <th>障害</th>
+                                        <td className="text-xs">{getCheckedItems(data.disability, disLabels)}</td>
+                                        <td className="text-xs">意思疎通: {data.communication}</td>
+                                    </tr>
+                                    
+                                    <tr>
+                                        <th>身体補助具</th>
+                                        <td colSpan="2" className="text-xs p-1">
+                                            <span className="mr-4 font">メガネ: {data.glasses}</span>
+                                            <span className="mr-4 font">補聴器: {data.hearing_aid}</span>
+                                            <span className="font">義歯: {data.denture === '有' ? `有 (${data.denture_detail})` : '無'}</span>
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <th>処置</th>
+                                        <td colSpan="2" className="text-xs" style={{whiteSpace:'pre-wrap'}}>{data.treatment_detail}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+
+                            <div className="flex border border-black mt-auto no-break-inside">
+                                <div className="w-2/3 border-r border-black p-1 min-h-[80px] text-xs">
+                                    <strong>特記事項</strong><br/>
+                                    <div style={{whiteSpace:'pre-wrap'}}>{data.specialNote}</div>
+                                </div>
+                                <div className="w-1/3 p-2 text-sm flex flex-col justify-between text-center">
+                                    <div className="whitespace-pre-wrap font-bold text-center mb-2">{data.facilityName}</div>
+                                    <div className="text-right">
+                                        <span className="mr-2 text-xs">サマリー担当者</span>
+                                        <span className="border-b border-black inline-block w-24 text-center mr-2">{data.staffName}</span>
+                                        <span className="border border-black rounded-full w-4 h-4 inline-flex items-center justify-center text-[10px] align-middle">印</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
