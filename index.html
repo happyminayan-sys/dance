@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Dance Recorder Pro - Manual Start</title>
+    <title>Dance Practice Pro - Speed Control</title>
     <style>
-        :root { --bg-color: #121212; --text-color: #e0e0e0; --accent-color: #00adb5; --record-color: #ff5252; }
+        :root { --bg-color: #121212; --text-color: #e0e0e0; --accent-color: #00adb5; --record-color: #ff5252; --speed-color: #9c27b0; }
         body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: var(--bg-color); color: var(--text-color); font-family: sans-serif; overflow: hidden; }
         .container { display: flex; flex-direction: column; width: 100vw; height: 100vh; }
         @media (orientation: landscape) {
@@ -14,13 +14,15 @@
         }
         .video-section, .camera-section { position: relative; width: 100%; height: 50%; background: #000; border: 1px solid #333; }
         #player, #webcam { width: 100%; height: 100%; object-fit: cover; }
-        #webcam { transform: scaleX(-1); } /* 左右反転 */
-        .controls { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 100; display: flex; flex-wrap: wrap; gap: 5px; background: rgba(0,0,0,0.8); padding: 10px; border-radius: 8px; width: 95%; max-width: 600px; }
-        input { flex-grow: 1; padding: 8px; border-radius: 4px; border: none; background: #333; color: #fff; min-width: 150px; }
-        button { padding: 8px 12px; border-radius: 4px; border: none; background: var(--accent-color); color: white; font-weight: bold; cursor: pointer; font-size: 12px; }
+        #webcam { transform: scaleX(-1); }
+        .controls { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 100; display: flex; flex-wrap: wrap; gap: 5px; background: rgba(0,0,0,0.85); padding: 12px; border-radius: 8px; width: 95%; max-width: 650px; justify-content: center; }
+        input { flex-grow: 1; padding: 8px; border-radius: 4px; border: none; background: #333; color: #fff; min-width: 150px; font-size: 14px; }
+        button { padding: 8px 10px; border-radius: 4px; border: none; background: var(--accent-color); color: white; font-weight: bold; cursor: pointer; font-size: 11px; }
         .rec-btn { background: var(--record-color); }
         .stop-btn { background: #555; display: none; }
-        .status-tag { position: absolute; top: 10px; left: 10px; padding: 2px 8px; border-radius: 4px; background: rgba(0,0,0,0.5); font-size: 10px; color: var(--accent-color); }
+        .speed-btn { background: var(--speed-color); }
+        .rewind-btn { background: #607d8b; }
+        .status-tag { position: absolute; top: 10px; left: 10px; padding: 2px 8px; border-radius: 4px; background: rgba(0,0,0,0.5); font-size: 10px; color: var(--accent-color); pointer-events: none; }
     </style>
 </head>
 <body>
@@ -39,8 +41,15 @@
 <div class="controls">
     <input type="text" id="videoUrl" placeholder="YouTube URL">
     <button onclick="loadVideo()">Load</button>
+    
     <button onclick="syncPlay()">Play/Pause</button>
-    <button id="startRec" class="rec-btn" onclick="startRecording()">REC (録画開始)</button>
+    <button class="rewind-btn" onclick="seekRelative(-10)">-10秒</button>
+    
+    <button class="speed-btn" onclick="setSpeed(0.5)">0.5x</button>
+    <button class="speed-btn" onclick="setSpeed(0.75)">0.75x</button>
+    <button class="speed-btn" onclick="setSpeed(1)">1.0x</button>
+    
+    <button id="startRec" class="rec-btn" onclick="startRecording()">REC</button>
     <button id="stopRec" class="stop-btn" onclick="stopRecording()">STOP & Save</button>
 </div>
 
@@ -59,47 +68,63 @@
 
     function onYouTubeIframeAPIReady() {
         player = new YT.Player('player', {
-            videoId: 'mU_G0f6rA-Y',
-            playerVars: { 
-                'playsinline': 1, 
-                'rel': 0,
-                'autoplay': 0 // 初期読み込み時の自動再生を無効化
-            }
+            videoId: 'mU_G0f6rA-Y', // 初期動画
+            playerVars: { 'playsinline': 1, 'rel': 0, 'autoplay': 0 }
         });
     }
 
     async function startCamera() {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
-                video: { 
-                    facingMode: "user", 
-                    width: { ideal: 640 }, // 遅延対策：解像度を抑制
-                    height: { ideal: 480 },
-                    frameRate: { ideal: 30 }
-                },
+                video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } },
                 audio: false
             });
             videoElement.srcObject = stream;
-        } catch (err) { alert("カメラ起動失敗: " + err.message); }
+        } catch (err) { console.error("Camera Error:", err); }
     }
 
+    // 再生速度の変更
+    function setSpeed(rate) {
+        if (player && player.setPlaybackRate) {
+            player.setPlaybackRate(rate);
+        }
+    }
+
+    // 指定秒数の移動
+    function seekRelative(seconds) {
+        if (player && player.getCurrentTime) {
+            const currentTime = player.getCurrentTime();
+            player.seekTo(currentTime + seconds, true);
+        }
+    }
+
+    function syncPlay() {
+        if (!player) return;
+        const s = player.getPlayerState();
+        s === 1 ? player.pauseVideo() : player.playVideo();
+    }
+
+    function loadVideo() {
+        const val = document.getElementById('videoUrl').value;
+        const id = val.match(/(?:v=|\/)([0-9A-Za-z_-]{11})/)?.[1];
+        if (id && player) player.cueVideoById(id);
+    }
+
+    // 録画ロジック
     function startRecording() {
         recordedChunks = [];
         const stream = videoElement.srcObject;
         mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8' });
-
         mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
-        
         mediaRecorder.onstop = () => {
             const blob = new Blob(recordedChunks, { type: 'video/webm' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `dance_practice_${new Date().getTime()}.webm`;
+            a.download = `dance_${new Date().getTime()}.webm`;
             a.click();
             URL.revokeObjectURL(url);
         };
-
         mediaRecorder.start();
         startBtn.style.display = 'none';
         stopBtn.style.display = 'inline-block';
@@ -113,26 +138,6 @@
         stopBtn.style.display = 'none';
         recStatus.textContent = "Camera (Mirror)";
         recStatus.style.color = "var(--accent-color)";
-    }
-
-    function loadVideo() {
-        const val = document.getElementById('videoUrl').value;
-        const id = val.match(/(?:v=|\/)([0-9A-Za-z_-]{11})/)?.[1];
-        if (id && player) {
-            // loadVideoById から cueVideoById に変更することで自動再生を停止
-            player.cueVideoById(id);
-        }
-    }
-
-    function syncPlay() {
-        if (!player) return;
-        const s = player.getPlayerState();
-        // 1 = 再生中, 5 = キュー済（待機中）, 2 = 一時停止中
-        if (s === 1) {
-            player.pauseVideo();
-        } else {
-            player.playVideo();
-        }
     }
 
     window.addEventListener('load', startCamera);
