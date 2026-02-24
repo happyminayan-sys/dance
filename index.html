@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Dance Practice Pro - Speed Control</title>
+    <title>Dance Practice Pro - Compact UI</title>
     <style>
         :root { --bg-color: #121212; --text-color: #e0e0e0; --accent-color: #00adb5; --record-color: #ff5252; --speed-color: #9c27b0; }
         body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: var(--bg-color); color: var(--text-color); font-family: sans-serif; overflow: hidden; }
@@ -15,7 +15,30 @@
         .video-section, .camera-section { position: relative; width: 100%; height: 50%; background: #000; border: 1px solid #333; }
         #player, #webcam { width: 100%; height: 100%; object-fit: cover; }
         #webcam { transform: scaleX(-1); }
-        .controls { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 100; display: flex; flex-wrap: wrap; gap: 5px; background: rgba(0,0,0,0.85); padding: 12px; border-radius: 8px; width: 95%; max-width: 650px; justify-content: center; }
+        
+        /* 操作パネルの初期状態 */
+        .controls { 
+            position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); 
+            z-index: 100; display: flex; flex-wrap: wrap; gap: 5px; 
+            background: rgba(0,0,0,0.85); padding: 12px; border-radius: 8px; 
+            width: 95%; max-width: 650px; justify-content: center;
+            transition: opacity 0.3s ease, transform 0.3s ease; /* アニメーション追加 */
+        }
+
+        /* 再生中の隠し状態（透明度を下げ、下に少しずらす） */
+        .controls.minimized {
+            opacity: 0.1; /* わずかに見える程度 */
+            transform: translate(-50%, 20px);
+            pointer-events: none; /* 下の要素を触れるようにする */
+        }
+        
+        /* ホバーまたは強制表示時 */
+        .controls:hover, .controls.force-show {
+            opacity: 1 !important;
+            transform: translate(-50%, 0) !important;
+            pointer-events: auto !important;
+        }
+
         input { flex-grow: 1; padding: 8px; border-radius: 4px; border: none; background: #333; color: #fff; min-width: 150px; font-size: 14px; }
         button { padding: 8px 10px; border-radius: 4px; border: none; background: var(--accent-color); color: white; font-weight: bold; cursor: pointer; font-size: 11px; }
         .rec-btn { background: var(--record-color); }
@@ -25,32 +48,24 @@
         .status-tag { position: absolute; top: 10px; left: 10px; padding: 2px 8px; border-radius: 4px; background: rgba(0,0,0,0.5); font-size: 10px; color: var(--accent-color); pointer-events: none; }
     </style>
 </head>
-<body>
-
-<div class="container">
-    <div class="video-section">
-        <div id="player"></div>
-        <div class="status-tag">YouTube</div>
-    </div>
+<body onclick="toggleControls()"> <div class="container">
+    <div class="video-section"><div id="player"></div><div class="status-tag">YouTube</div></div>
     <div class="camera-section">
         <video id="webcam" autoplay playsinline muted></video>
         <div class="status-tag" id="recStatus">Camera (Mirror)</div>
     </div>
 </div>
 
-<div class="controls">
+<div class="controls" id="controlBar">
     <input type="text" id="videoUrl" placeholder="YouTube URL">
     <button onclick="loadVideo()">Load</button>
-    
     <button onclick="syncPlay()">Play/Pause</button>
-    <button class="rewind-btn" onclick="seekRelative(-10)">-10秒</button>
-    
+    <button class="rewind-btn" onclick="seekRelative(-10)">-10s</button>
     <button class="speed-btn" onclick="setSpeed(0.5)">0.5x</button>
     <button class="speed-btn" onclick="setSpeed(0.75)">0.75x</button>
     <button class="speed-btn" onclick="setSpeed(1)">1.0x</button>
-    
     <button id="startRec" class="rec-btn" onclick="startRecording()">REC</button>
-    <button id="stopRec" class="stop-btn" onclick="stopRecording()">STOP & Save</button>
+    <button id="stopRec" class="stop-btn" onclick="stopRecording()">STOP</button>
 </div>
 
 <script>
@@ -58,6 +73,7 @@
     let mediaRecorder;
     let recordedChunks = [];
     const videoElement = document.getElementById('webcam');
+    const controlBar = document.getElementById('controlBar');
     const startBtn = document.getElementById('startRec');
     const stopBtn = document.getElementById('stopRec');
     const recStatus = document.getElementById('recStatus');
@@ -68,9 +84,35 @@
 
     function onYouTubeIframeAPIReady() {
         player = new YT.Player('player', {
-            videoId: 'mU_G0f6rA-Y', // 初期動画
-            playerVars: { 'playsinline': 1, 'rel': 0, 'autoplay': 0 }
+            videoId: 'mU_G0f6rA-Y',
+            playerVars: { 'playsinline': 1, 'rel': 0, 'autoplay': 0 },
+            events: {
+                'onStateChange': onPlayerStateChange // 状態監視イベントを追加
+            }
         });
+    }
+
+    // 再生状態に合わせてUIを切り替え
+    function onPlayerStateChange(event) {
+        if (event.data === YT.PlayerState.PLAYING) {
+            // 再生開始から2秒後に隠す
+            setTimeout(() => {
+                if (player.getPlayerState() === YT.PlayerState.PLAYING) {
+                    controlBar.classList.add('minimized');
+                }
+            }, 2000);
+        } else {
+            // 一時停止・終了時は表示
+            controlBar.classList.remove('minimized');
+        }
+    }
+
+    // 画面タップでUIの表示/非表示を強制切り替え
+    function toggleControls() {
+        if (controlBar.classList.contains('minimized')) {
+            controlBar.classList.add('force-show');
+            setTimeout(() => controlBar.classList.remove('force-show'), 5000); // 5秒後に再度隠す
+        }
     }
 
     async function startCamera() {
@@ -83,62 +125,28 @@
         } catch (err) { console.error("Camera Error:", err); }
     }
 
-    // 再生速度の変更
-    function setSpeed(rate) {
-        if (player && player.setPlaybackRate) {
-            player.setPlaybackRate(rate);
-        }
-    }
+    function setSpeed(rate) { if (player?.setPlaybackRate) player.setPlaybackRate(rate); }
+    function seekRelative(seconds) { if (player?.getCurrentTime) player.seekTo(player.getCurrentTime() + seconds, true); }
+    function syncPlay() { if (!player) return; player.getPlayerState() === 1 ? player.pauseVideo() : player.playVideo(); }
+    function loadVideo() { const val = document.getElementById('videoUrl').value; const id = val.match(/(?:v=|\/)([0-9A-Za-z_-]{11})/)?.[1]; if (id && player) player.cueVideoById(id); }
 
-    // 指定秒数の移動
-    function seekRelative(seconds) {
-        if (player && player.getCurrentTime) {
-            const currentTime = player.getCurrentTime();
-            player.seekTo(currentTime + seconds, true);
-        }
-    }
-
-    function syncPlay() {
-        if (!player) return;
-        const s = player.getPlayerState();
-        s === 1 ? player.pauseVideo() : player.playVideo();
-    }
-
-    function loadVideo() {
-        const val = document.getElementById('videoUrl').value;
-        const id = val.match(/(?:v=|\/)([0-9A-Za-z_-]{11})/)?.[1];
-        if (id && player) player.cueVideoById(id);
-    }
-
-    // 録画ロジック
     function startRecording() {
         recordedChunks = [];
-        const stream = videoElement.srcObject;
-        mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8' });
+        mediaRecorder = new MediaRecorder(videoElement.srcObject, { mimeType: 'video/webm;codecs=vp8' });
         mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
         mediaRecorder.onstop = () => {
             const blob = new Blob(recordedChunks, { type: 'video/webm' });
-            const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.href = url;
-            a.download = `dance_${new Date().getTime()}.webm`;
+            a.href = URL.createObjectURL(blob);
+            a.download = `dance_${Date.now()}.webm`;
             a.click();
-            URL.revokeObjectURL(url);
         };
         mediaRecorder.start();
-        startBtn.style.display = 'none';
-        stopBtn.style.display = 'inline-block';
-        recStatus.textContent = "● RECORDING";
-        recStatus.style.color = "red";
+        startBtn.style.display = 'none'; stopBtn.style.display = 'inline-block';
+        recStatus.textContent = "● RECORDING"; recStatus.style.color = "red";
     }
 
-    function stopRecording() {
-        mediaRecorder.stop();
-        startBtn.style.display = 'inline-block';
-        stopBtn.style.display = 'none';
-        recStatus.textContent = "Camera (Mirror)";
-        recStatus.style.color = "var(--accent-color)";
-    }
+    function stopRecording() { mediaRecorder.stop(); startBtn.style.display = 'inline-block'; stopBtn.style.display = 'none'; recStatus.textContent = "Camera (Mirror)"; recStatus.style.color = "var(--accent-color)"; }
 
     window.addEventListener('load', startCamera);
 </script>
